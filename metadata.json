@@ -1,0 +1,5 @@
+{
+  "name": "eNote OFPPT - Attendance & Grades",
+  "description": "A comprehensive management tool for teachers to track student attendance via QR codes, manage grades, and import student data from Excel.",
+  "requestFramePermissions": ["camera"]
+}
