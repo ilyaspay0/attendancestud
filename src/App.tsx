@@ -42,6 +42,28 @@ import {
 } from 'recharts';
 import { cn } from './lib/utils';
 import { Student, AttendanceSession, Module } from './types';
+import { auth, db } from './firebase';
+import { 
+  collection, 
+  onSnapshot, 
+  doc, 
+  setDoc, 
+  addDoc, 
+  updateDoc, 
+  deleteDoc, 
+  query, 
+  where, 
+  getDoc,
+  getDocs,
+  Timestamp
+} from 'firebase/firestore';
+import { 
+  onAuthStateChanged, 
+  signInWithPopup, 
+  GoogleAuthProvider, 
+  signOut,
+  User
+} from 'firebase/auth';
 
 // --- Translations ---
 
@@ -116,6 +138,10 @@ const translations = {
     sessionExpires: 'Session expires in',
     sessionExpired: 'This session has expired',
     invalidGrade: 'Grade must be between 0 and 20',
+    login: 'Login with Google',
+    logout: 'Logout',
+    accessDenied: 'Access Denied',
+    onlyInstructor: 'Only the lead instructor can access this console.',
     minutes: 'm',
     seconds: 's'
   },
@@ -189,6 +215,10 @@ const translations = {
     sessionExpires: 'La session expire dans',
     sessionExpired: 'Cette session a expiré',
     invalidGrade: 'La note doit être comprise entre 0 et 20',
+    login: 'Se connecter avec Google',
+    logout: 'Se déconnecter',
+    accessDenied: 'Accès Refusé',
+    onlyInstructor: 'Seul l\'instructeur principal peut accéder à cette console.',
     minutes: 'm',
     seconds: 's'
   }
@@ -207,49 +237,83 @@ const CheckInPage = ({ t }: { t: any }) => {
 
   useEffect(() => {
     if (sessionId) {
-      fetch(`/api/sessions/${sessionId}`)
-        .then(res => res.json())
-        .then(data => {
+      const sessionRef = doc(db, 'sessions', sessionId);
+      const unsubscribe = onSnapshot(sessionRef, (docSnap) => {
+        if (docSnap.exists()) {
+          const data = docSnap.data() as AttendanceSession;
           setSession(data);
           if (data.expiresAt && new Date() > new Date(data.expiresAt)) {
             setStatus('error');
             setMessage(t.sessionExpired);
           }
-        })
-        .catch(() => {
+        } else {
           setStatus('error');
           setMessage('Session not found');
-        });
+        }
+      }, (error) => {
+        console.error("Firestore Error:", error);
+        setStatus('error');
+        setMessage('Error loading session');
+      });
+      return () => unsubscribe();
     }
   }, [sessionId, t.sessionExpired]);
 
   const handleCheckIn = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!fullName || !sessionId) return;
-    if (session?.expiresAt && new Date() > new Date(session.expiresAt)) {
+    if (!fullName || !sessionId || !session) return;
+    
+    if (session.expiresAt && new Date() > new Date(session.expiresAt)) {
       setStatus('error');
       setMessage(t.sessionExpired);
       return;
     }
 
-    setStatus('loading');
-    try {
-      const res = await fetch('/api/check-in', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ sessionId, fullName })
-      });
-      const data = await res.json();
-      if (res.ok) {
-        setStatus('success');
-        setMessage(t.success);
-      } else {
-        setStatus('error');
-        setMessage(data.error || 'Error');
-      }
-    } catch (err) {
+    if (session.isFinalized) {
       setStatus('error');
-      setMessage('Network error');
+      setMessage(t.finalizeSession);
+      return;
+    }
+
+    setStatus('loading');
+
+    try {
+      // Find student by name within the session's group
+      const studentsRef = collection(db, 'students');
+      const q = query(
+        studentsRef, 
+        where('name', '==', fullName),
+        where('group', '==', session.group)
+      );
+      const querySnapshot = await getDocs(q);
+
+      if (querySnapshot.empty) {
+        setStatus('error');
+        setMessage(t.studentNotFound);
+        return;
+      }
+
+      const studentDoc = querySnapshot.docs[0];
+      const studentId = studentDoc.id;
+
+      if (session.presentStudents.includes(studentId)) {
+        setStatus('success');
+        setMessage(t.alreadyMarked);
+        return;
+      }
+
+      // Update session with new present student
+      const sessionRef = doc(db, 'sessions', sessionId);
+      await updateDoc(sessionRef, {
+        presentStudents: [...session.presentStudents, studentId]
+      });
+
+      setStatus('success');
+      setMessage(t.attendanceLogged);
+    } catch (err) {
+      console.error('Check-in error:', err);
+      setStatus('error');
+      setMessage('An error occurred during check-in');
     }
   };
 
@@ -318,19 +382,28 @@ const ModuleManagement = ({ modules, setModules, t, theme }: { modules: Module[]
   const [isAdding, setIsAdding] = useState(false);
   const [newModule, setNewModule] = useState({ name: '', cours: 0, tp: 0, td: 0, evaluation: 0 });
 
-  const handleAdd = (e: React.FormEvent) => {
+  const handleAdd = async (e: React.FormEvent) => {
     e.preventDefault();
+    const id = Math.random().toString(36).substr(2, 9);
     const module: Module = {
-      id: Math.random().toString(36).substr(2, 9),
+      id,
       ...newModule
     };
-    setModules([...modules, module]);
-    setNewModule({ name: '', cours: 0, tp: 0, td: 0, evaluation: 0 });
-    setIsAdding(false);
+    try {
+      await setDoc(doc(db, 'modules', id), module);
+      setNewModule({ name: '', cours: 0, tp: 0, td: 0, evaluation: 0 });
+      setIsAdding(false);
+    } catch (err) {
+      console.error('Error adding module:', err);
+    }
   };
 
-  const handleDelete = (id: string) => {
-    setModules(modules.filter(m => m.id !== id));
+  const handleDelete = async (id: string) => {
+    try {
+      await deleteDoc(doc(db, 'modules', id));
+    } catch (err) {
+      console.error('Error deleting module:', err);
+    }
   };
 
   return (
@@ -609,13 +682,13 @@ const StudentList = ({ students, setStudents, t, theme }: { students: Student[],
   const [search, setSearch] = useState('');
   const [isUploading, setIsUploading] = useState(false);
 
-  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
 
     setIsUploading(true);
     const reader = new FileReader();
-    reader.onload = (evt) => {
+    reader.onload = async (evt) => {
       const bstr = evt.target?.result;
       const wb = XLSX.read(bstr, { type: 'binary' });
       const wsname = wb.SheetNames[0];
@@ -633,15 +706,25 @@ const StudentList = ({ students, setStudents, t, theme }: { students: Student[],
         }
       }));
 
-      setStudents(prev => [...prev, ...newStudents]);
-      setIsUploading(false);
+      try {
+        const batch = newStudents.map(s => setDoc(doc(db, 'students', s.id), s));
+        await Promise.all(batch);
+      } catch (err) {
+        console.error('Error importing students:', err);
+      } finally {
+        setIsUploading(false);
+      }
     };
     reader.readAsBinaryString(file);
   };
 
-  const deleteStudent = (id: string) => {
+  const deleteStudent = async (id: string) => {
     if (confirm('Are you sure you want to delete this student?')) {
-      setStudents(prev => prev.filter(s => s.id !== id));
+      try {
+        await deleteDoc(doc(db, 'students', id));
+      } catch (err) {
+        console.error('Error deleting student:', err);
+      }
     }
   };
 
@@ -781,29 +864,24 @@ const AttendanceScanner = ({ students, sessions, setSessions, t, theme }: { stud
     return () => clearInterval(timer);
   }, [isSessionActive, currentSession]);
 
-  // Poll for session updates
+  // Real-time listener for current session
   useEffect(() => {
-    let interval: any;
     if (isSessionActive && currentSession) {
-      interval = setInterval(async () => {
-        try {
-          const res = await fetch(`/api/sessions/${currentSession.id}`);
-          if (res.ok) {
-            const updatedSession = await res.json();
-            setCurrentSession(updatedSession);
-          }
-        } catch (err) {
-          console.error('Polling error:', err);
+      const sessionRef = doc(db, 'sessions', currentSession.id);
+      const unsubscribe = onSnapshot(sessionRef, (docSnap) => {
+        if (docSnap.exists()) {
+          setCurrentSession(docSnap.data() as AttendanceSession);
         }
-      }, 2000);
+      });
+      return () => unsubscribe();
     }
-    return () => clearInterval(interval);
-  }, [isSessionActive, currentSession]);
+  }, [isSessionActive, currentSession?.id]);
 
   const startSession = async () => {
     if (!selectedGroup) return alert('Please select a group first');
+    const sessionId = `SES-${Date.now()}`;
     const newSession: AttendanceSession = {
-      id: `SES-${Date.now()}`,
+      id: sessionId,
       date: new Date().toISOString(),
       group: selectedGroup,
       presentStudents: [],
@@ -812,56 +890,49 @@ const AttendanceScanner = ({ students, sessions, setSessions, t, theme }: { stud
     };
 
     try {
-      const res = await fetch('/api/sessions', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(newSession)
-      });
-      if (res.ok) {
-        setCurrentSession(newSession);
-        setIsSessionActive(true);
-      }
+      await setDoc(doc(db, 'sessions', sessionId), newSession);
+      setCurrentSession(newSession);
+      setIsSessionActive(true);
     } catch (err) {
+      console.error('Error starting session:', err);
       alert('Failed to start session');
     }
   };
 
   const markPresence = async (studentId: string) => {
     if (!currentSession) return;
+    
+    // Check if student exists and is in the correct group
+    const student = students.find(s => s.id === studentId);
+    if (!student) return alert(t.studentNotFound);
+    if (student.group !== currentSession.group) return alert(t.notInGroup);
+    
+    if (currentSession.presentStudents.includes(studentId)) {
+      return alert(t.alreadyMarked);
+    }
+
     try {
-      const res = await fetch('/api/check-in', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ sessionId: currentSession.id, studentId })
+      const sessionRef = doc(db, 'sessions', currentSession.id);
+      await updateDoc(sessionRef, {
+        presentStudents: [...currentSession.presentStudents, studentId]
       });
-      const data = await res.json();
-      if (res.ok) {
-        setCurrentSession(data.session);
-        setManualId('');
-      } else {
-        alert(data.error);
-      }
+      setManualId('');
     } catch (err) {
+      console.error('Check-in error:', err);
       alert('Check-in failed');
     }
   };
 
   const saveSession = async () => {
     if (currentSession) {
-      const finalizedSession = { ...currentSession, isFinalized: true };
       try {
-        const res = await fetch(`/api/sessions/${currentSession.id}`, {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(finalizedSession)
-        });
-        if (res.ok) {
-          setSessions(prev => [...prev, finalizedSession]);
-          setIsSessionActive(false);
-          setCurrentSession(null);
-          alert('Attendance session finalized and saved!');
-        }
+        const sessionRef = doc(db, 'sessions', currentSession.id);
+        await updateDoc(sessionRef, { isFinalized: true });
+        setIsSessionActive(false);
+        setCurrentSession(null);
+        alert('Attendance session finalized and saved!');
       } catch (err) {
+        console.error('Error finalizing session:', err);
         alert('Failed to finalize session');
       }
     }
@@ -1060,7 +1131,7 @@ const GradeManagement = ({ students, setStudents, t, theme }: { students: Studen
   const [errors, setErrors] = useState<Record<string, string>>({});
   const groups = [...new Set(students.map(s => s.group))];
 
-  const updateGrade = (studentId: string, field: keyof Student['grades'], value: string) => {
+  const updateGrade = async (studentId: string, field: keyof Student['grades'], value: string) => {
     const errorKey = `${studentId}-${field}`;
     
     if (value === '') {
@@ -1069,65 +1140,41 @@ const GradeManagement = ({ students, setStudents, t, theme }: { students: Studen
         delete next[errorKey];
         return next;
       });
-      setStudents(prev => prev.map(s => {
-        if (s.id === studentId) {
-          return {
-            ...s,
-            grades: {
-              ...s.grades,
-              [field]: undefined
-            }
-          };
+      try {
+        const studentRef = doc(db, 'students', studentId);
+        const student = students.find(s => s.id === studentId);
+        if (student) {
+          await updateDoc(studentRef, {
+            [`grades.${field}`]: null
+          });
         }
-        return s;
-      }));
+      } catch (err) {
+        console.error('Error updating grade:', err);
+      }
       return;
     }
 
     const num = parseFloat(value);
     
-    // Check if it's a valid number and within range
     if (isNaN(num) || num < 0 || num > 20) {
       setErrors(prev => ({ ...prev, [errorKey]: t.invalidGrade }));
-      // We still update the state with the raw value if it's a number but out of range, 
-      // or we can choose to just show the error and not update the student state.
-      // Let's update the student state only if it's a valid number, but show error if out of range.
-      if (!isNaN(num)) {
-        setStudents(prev => prev.map(s => {
-          if (s.id === studentId) {
-            return {
-              ...s,
-              grades: {
-                ...s.grades,
-                [field]: num
-              }
-            };
-          }
-          return s;
-        }));
-      }
       return;
     }
 
-    // Clear error if valid
     setErrors(prev => {
       const next = { ...prev };
       delete next[errorKey];
       return next;
     });
 
-    setStudents(prev => prev.map(s => {
-      if (s.id === studentId) {
-        return {
-          ...s,
-          grades: {
-            ...s.grades,
-            [field]: num
-          }
-        };
-      }
-      return s;
-    }));
+    try {
+      const studentRef = doc(db, 'students', studentId);
+      await updateDoc(studentRef, {
+        [`grades.${field}`]: num
+      });
+    } catch (err) {
+      console.error('Error updating grade:', err);
+    }
   };
 
   const filtered = selectedGroup 
@@ -1275,52 +1322,75 @@ export default function App() {
   const [students, setStudents] = useState<Student[]>([]);
   const [sessions, setSessions] = useState<AttendanceSession[]>([]);
   const [modules, setModules] = useState<Module[]>([]);
+  const [user, setUser] = useState<User | null>(null);
+  const [isAuthReady, setIsAuthReady] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
 
   const t = translations[lang];
 
   useEffect(() => {
-    const fetchData = async () => {
-      try {
-        const [sRes, sesRes, mRes] = await Promise.all([
-          fetch('/api/students'),
-          fetch('/api/sessions'),
-          fetch('/api/modules')
-        ]);
-        const sData = await sRes.json();
-        const sesData = await sesRes.json();
-        const mData = await mRes.json();
-        setStudents(sData);
-        setSessions(sesData);
-        setModules(mData);
-      } catch (err) {
-        console.error('Fetch error:', err);
-      } finally {
-        setIsLoading(false);
-      }
-    };
-    fetchData();
+    const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
+      setUser(currentUser);
+      setIsAuthReady(true);
+    });
+    return () => unsubscribe();
   }, []);
 
   useEffect(() => {
-    if (!isLoading) {
-      fetch('/api/students', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(students)
-      });
-    }
-  }, [students, isLoading]);
+    if (!isAuthReady) return;
 
-  useEffect(() => {
-    if (!isLoading) {
-      fetch('/api/modules', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(modules)
+    // Real-time listeners
+    const unsubSessions = onSnapshot(collection(db, 'sessions'), (snapshot) => {
+      setSessions(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as AttendanceSession)));
+    }, (error) => {
+      console.error("Sessions listener error:", error);
+    });
+
+    let unsubStudents = () => {};
+    let unsubModules = () => {};
+
+    // Only listen to students and modules if user is the instructor
+    if (user && user.email === 'ilyaspay0@gmail.com') {
+      unsubStudents = onSnapshot(collection(db, 'students'), (snapshot) => {
+        setStudents(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as Student)));
+      }, (error) => {
+        console.error("Students listener error:", error);
       });
+
+      unsubModules = onSnapshot(collection(db, 'modules'), (snapshot) => {
+        setModules(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as Module)));
+        setIsLoading(false);
+      }, (error) => {
+        console.error("Modules listener error:", error);
+        setIsLoading(false);
+      });
+    } else {
+      setIsLoading(false);
     }
-  }, [modules, isLoading]);
+
+    return () => {
+      unsubStudents();
+      unsubSessions();
+      unsubModules();
+    };
+  }, [isAuthReady, user]);
+
+  const handleLogin = async () => {
+    const provider = new GoogleAuthProvider();
+    try {
+      await signInWithPopup(auth, provider);
+    } catch (err) {
+      console.error('Login error:', err);
+    }
+  };
+
+  const handleLogout = async () => {
+    try {
+      await signOut(auth);
+    } catch (err) {
+      console.error('Logout error:', err);
+    }
+  };
 
   useEffect(() => {
     localStorage.setItem('ofppt_theme', theme);
@@ -1335,6 +1405,63 @@ export default function App() {
   const urlParams = new URLSearchParams(window.location.search);
   if (urlParams.get('page') === 'check-in' || window.location.pathname === '/check-in') {
     return <CheckInPage t={t} />;
+  }
+
+  if (!isAuthReady) return null;
+
+  if (!user) {
+    return (
+      <div className={cn(
+        "min-h-screen flex items-center justify-center p-6 transition-colors duration-500",
+        theme === 'dark' ? "bg-app-main" : "bg-slate-50"
+      )}>
+        <motion.div 
+          initial={{ opacity: 0, scale: 0.9 }}
+          animate={{ opacity: 1, scale: 1 }}
+          className="max-w-md w-full bg-app-card border border-app-main p-12 rounded-[3rem] shadow-2xl text-center space-y-8"
+        >
+          <div className="w-20 h-20 bg-emerald-500 rounded-3xl flex items-center justify-center mx-auto shadow-xl shadow-emerald-500/20">
+            <GraduationCap className="w-10 h-10 text-black" />
+          </div>
+          <div className="space-y-2">
+            <h1 className="text-3xl font-black tracking-tight text-app-strong">eNote <span className="text-emerald-500">OFPPT</span></h1>
+            <p className="text-app-muted text-sm uppercase tracking-widest font-bold">{t.managementConsole}</p>
+          </div>
+          <button 
+            onClick={handleLogin}
+            className="w-full py-5 bg-emerald-500 text-black font-black rounded-2xl hover:bg-emerald-400 transition-all shadow-xl shadow-emerald-500/20 active:scale-95 uppercase tracking-widest text-sm"
+          >
+            {t.login}
+          </button>
+        </motion.div>
+      </div>
+    );
+  }
+
+  // Check if user is the lead instructor
+  const isInstructor = user.email === 'ilyaspay0@gmail.com';
+
+  if (!isInstructor) {
+    return (
+      <div className={cn(
+        "min-h-screen flex items-center justify-center p-6 transition-colors duration-500",
+        theme === 'dark' ? "bg-app-main" : "bg-slate-50"
+      )}>
+        <div className="max-w-md w-full bg-app-card border border-app-main p-12 rounded-[3rem] shadow-2xl text-center space-y-6">
+          <div className="w-20 h-20 bg-rose-500/10 rounded-3xl flex items-center justify-center mx-auto text-rose-500">
+            <XCircle className="w-10 h-10" />
+          </div>
+          <h1 className="text-2xl font-black text-app-strong">{t.accessDenied}</h1>
+          <p className="text-app-muted text-sm leading-relaxed">{t.onlyInstructor}</p>
+          <button 
+            onClick={handleLogout}
+            className="w-full py-4 bg-white/5 border border-app-main text-app-strong font-bold rounded-2xl hover:bg-white/10 transition-all uppercase tracking-widest text-xs"
+          >
+            {t.logout}
+          </button>
+        </div>
+      </div>
+    );
   }
 
   const tabs = [

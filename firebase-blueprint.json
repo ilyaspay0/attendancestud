@@ -1,0 +1,65 @@
+{
+  "entities": {
+    "Student": {
+      "title": "Student",
+      "description": "A student record with attendance and grades",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "group": { "type": "string" },
+        "attendance": { "type": "array" },
+        "grades": {
+          "type": "object",
+          "properties": {
+            "cc": { "type": "number" },
+            "efm": { "type": "number" }
+          }
+        }
+      },
+      "required": ["id", "name", "group"]
+    },
+    "AttendanceSession": {
+      "title": "AttendanceSession",
+      "description": "An attendance session for a specific group",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "date": { "type": "string" },
+        "group": { "type": "string" },
+        "presentStudents": { "type": "array" },
+        "isFinalized": { "type": "boolean" },
+        "expiresAt": { "type": "string" }
+      },
+      "required": ["id", "date", "group", "presentStudents"]
+    },
+    "Module": {
+      "title": "Module",
+      "description": "An academic module with hours",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "cours": { "type": "number" },
+        "tp": { "type": "number" },
+        "td": { "type": "number" },
+        "evaluation": { "type": "number" }
+      },
+      "required": ["id", "name"]
+    }
+  },
+  "firestore": {
+    "/students/{studentId}": {
+      "schema": "Student",
+      "description": "Collection of students"
+    },
+    "/sessions/{sessionId}": {
+      "schema": "AttendanceSession",
+      "description": "Collection of attendance sessions"
+    },
+    "/modules/{moduleId}": {
+      "schema": "Module",
+      "description": "Collection of modules"
+    }
+  }
+}

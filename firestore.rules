@@ -1,0 +1,85 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    
+    // ===============================================================
+    // Helper Functions
+    // ===============================================================
+    
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+    
+    function isAdmin() {
+      return isAuthenticated() && 
+        (request.auth.token.email == "ilyaspay0@gmail.com" && request.auth.token.email_verified == true);
+    }
+
+    function hasOnlyAllowedFields(fields) {
+      return request.resource.data.keys().hasOnly(fields);
+    }
+
+    // ===============================================================
+    // Domain Validators
+    // ===============================================================
+
+    function isValidStudent(data) {
+      return data.id is string && data.id.size() > 0 &&
+             data.name is string && data.name.size() > 0 && data.name.size() < 100 &&
+             data.group is string && data.group.size() > 0 &&
+             (!('attendance' in data) || data.attendance is list) &&
+             (!('grades' in data) || (data.grades is map && 
+               (!('cc' in data.grades) || data.grades.cc is number) &&
+               (!('efm' in data.grades) || data.grades.efm is number)
+             ));
+    }
+
+    function isValidSession(data) {
+      return data.id is string &&
+             data.date is string &&
+             data.group is string &&
+             data.presentStudents is list &&
+             (!('isFinalized' in data) || data.isFinalized is bool) &&
+             (!('expiresAt' in data) || data.expiresAt is string);
+    }
+
+    function isValidModule(data) {
+      return data.id is string &&
+             data.name is string && data.name.size() > 0 &&
+             data.cours is number &&
+             data.tp is number &&
+             data.td is number &&
+             data.evaluation is number;
+    }
+
+    // ===============================================================
+    // Rules
+    // ===============================================================
+
+    match /students/{studentId} {
+      allow read, write: if isAdmin();
+    }
+
+    match /sessions/{sessionId} {
+      // Students need to read session to check in
+      allow read: if true;
+      
+      allow create, delete: if isAdmin();
+      
+      allow update: if isAdmin() || (
+        // Student check-in logic
+        isValidSession(request.resource.data) &&
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['presentStudents']) &&
+        request.resource.data.presentStudents.size() == resource.data.presentStudents.size() + 1 &&
+        request.resource.data.presentStudents.hasAll(resource.data.presentStudents) &&
+        // Ensure session is not finalized or expired
+        resource.data.isFinalized != true &&
+        (!('expiresAt' in resource.data) || duration.value(timestamp.date(request.time) - timestamp.date(timestamp(resource.data.expiresAt))) < 0)
+      );
+    }
+
+    match /modules/{moduleId} {
+      allow read, write: if isAdmin();
+    }
+  }
+}
