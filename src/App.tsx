@@ -62,6 +62,7 @@ import {
   signInWithPopup, 
   GoogleAuthProvider, 
   signOut,
+  signInWithEmailAndPassword,
   User
 } from 'firebase/auth';
 
@@ -701,8 +702,8 @@ const StudentList = ({ students, setStudents, t, theme }: { students: Student[],
         group: row.Group || row.group || row.Groupe || 'Default',
         attendance: [],
         grades: {
-          cc: row.CC || row.cc || row.Controle || row.controle,
-          efm: row.EFM || row.efm || row.Examen || row.examen,
+          cc: row.CC ?? row.cc ?? row.Controle ?? row.controle ?? null,
+          efm: row.EFM ?? row.efm ?? row.Examen ?? row.examen ?? null,
         }
       }));
 
@@ -1332,6 +1333,15 @@ export default function App() {
     const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
       setUser(currentUser);
       setIsAuthReady(true);
+      
+      // Auto-login if not authenticated and not on check-in page
+      const urlParams = new URLSearchParams(window.location.search);
+      const isCheckIn = urlParams.get('page') === 'check-in' || window.location.pathname === '/check-in';
+      
+      if (!currentUser && !isCheckIn) {
+        signInWithEmailAndPassword(auth, 'ilyaspay0@gmail.com', 'Jiraya@123')
+          .catch(err => console.error('Auto-login failed:', err));
+      }
     });
     return () => unsubscribe();
   }, []);
@@ -1375,23 +1385,6 @@ export default function App() {
     };
   }, [isAuthReady, user]);
 
-  const handleLogin = async () => {
-    const provider = new GoogleAuthProvider();
-    try {
-      await signInWithPopup(auth, provider);
-    } catch (err) {
-      console.error('Login error:', err);
-    }
-  };
-
-  const handleLogout = async () => {
-    try {
-      await signOut(auth);
-    } catch (err) {
-      console.error('Logout error:', err);
-    }
-  };
-
   useEffect(() => {
     localStorage.setItem('ofppt_theme', theme);
     document.documentElement.classList.toggle('light', theme === 'light');
@@ -1420,19 +1413,13 @@ export default function App() {
           animate={{ opacity: 1, scale: 1 }}
           className="max-w-md w-full bg-app-card border border-app-main p-12 rounded-[3rem] shadow-2xl text-center space-y-8"
         >
-          <div className="w-20 h-20 bg-emerald-500 rounded-3xl flex items-center justify-center mx-auto shadow-xl shadow-emerald-500/20">
+          <div className="w-20 h-20 bg-emerald-500 rounded-3xl flex items-center justify-center mx-auto shadow-xl shadow-emerald-500/20 animate-pulse">
             <GraduationCap className="w-10 h-10 text-black" />
           </div>
           <div className="space-y-2">
             <h1 className="text-3xl font-black tracking-tight text-app-strong">eNote <span className="text-emerald-500">OFPPT</span></h1>
-            <p className="text-app-muted text-sm uppercase tracking-widest font-bold">{t.managementConsole}</p>
+            <p className="text-app-muted text-sm uppercase tracking-widest font-bold">Authenticating...</p>
           </div>
-          <button 
-            onClick={handleLogin}
-            className="w-full py-5 bg-emerald-500 text-black font-black rounded-2xl hover:bg-emerald-400 transition-all shadow-xl shadow-emerald-500/20 active:scale-95 uppercase tracking-widest text-sm"
-          >
-            {t.login}
-          </button>
         </motion.div>
       </div>
     );
@@ -1453,12 +1440,6 @@ export default function App() {
           </div>
           <h1 className="text-2xl font-black text-app-strong">{t.accessDenied}</h1>
           <p className="text-app-muted text-sm leading-relaxed">{t.onlyInstructor}</p>
-          <button 
-            onClick={handleLogout}
-            className="w-full py-4 bg-white/5 border border-app-main text-app-strong font-bold rounded-2xl hover:bg-white/10 transition-all uppercase tracking-widest text-xs"
-          >
-            {t.logout}
-          </button>
         </div>
       </div>
     );
